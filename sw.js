@@ -3,7 +3,7 @@ const CACHE = 'zju-bid-v1';
 const ASSETS = [
   './', './index.html', './app.js', './engine.js',
   './data.js', './data-zju.js', './data-xinrui.js',
-  './manifest.json', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'
+  './manifest.json', './icons/icon-192.png', './icons/icon-512.png'
 ];
 
 self.addEventListener('install', e => {
