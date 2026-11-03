@@ -669,7 +669,7 @@ body.done .meaning-card{display:none}
   <div class="brand"><b>ZJU 叫牌</b><span id="brandSub">SAYC · Standard American Yellow Card</span></div>
   <div class="acts">
     <div class="pager" id="pager" aria-hidden="true">
-      <i data-pg="0"></i><i data-pg="1"></i>
+      <i data-pg="0"></i><i data-pg="1"></i><i data-pg="2"></i>
     </div>
     <button class="btn ghost" id="btnUndo">撤回</button>
     <button class="btn" id="btnNew">新一局</button>
@@ -694,18 +694,18 @@ body.done .meaning-card{display:none}
 </div>
 
 <div class="swipe" id="swipe">
-  <div class="swipe-page">
-<main class="main">
-  <section class="left">
-    <div class="card">
-      <div class="card-t">叫牌记录<span class="card-hint" id="auctionHint"></span></div>
-      <div class="auction" id="auction"></div>
-    </div>
-  </section>
-  <section class="right">
-    <div class="card bids-card">
-      <div id="bids"></div>
-    </div>
+  <div class="swipe-page ai-page" id="pageAI">
+    <div class="ai-wrap">
+      <div class="ai-head">
+        <div>
+          <div class="ai-title">AI 叫牌分析</div>
+          <div class="ai-sub" id="aiSub">基于当前体系的规则给建议</div>
+        </div>
+        <div class="ai-head-acts">
+          <button type="button" class="btn ghost" id="aiCfgBtn">接口设置</button>
+          <button type="button" class="btn ghost" id="aiClear">清空对话</button>
+        </div>
+      </div>
 
       <div class="ai-hand">
         <div class="ai-hand-head">
@@ -737,6 +737,36 @@ body.done .meaning-card{display:none}
         </div>
         <div class="ai-out" id="adOut"></div>
       </div>
+
+      <details class="ai-block" id="aiBlock" open>
+        <summary>
+          <span class="ai-block-t">AI 分析</span>
+          <span class="ai-block-s" id="aiBlockSub"></span>
+        </summary>
+        <div class="ai-block-body">
+          <div class="ai-chat" id="aiChat"></div>
+          <div class="ai-acts">
+            <button type="button" class="btn primary" id="aiRun">分析当前局面</button>
+            <button type="button" class="btn ghost" id="aiCopy">复制上下文</button>
+          </div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <div class="swipe-page">
+<main class="main">
+  <section class="left">
+    <div class="card">
+      <div class="card-t">叫牌记录<span class="card-hint" id="auctionHint"></span></div>
+      <div class="auction" id="auction"></div>
+    </div>
+  </section>
+  <section class="right">
+    <div class="card bids-card">
+      <div id="bids"></div>
+    </div>
+
   </section>
 </main>
 
@@ -758,6 +788,34 @@ body.done .meaning-card{display:none}
   </div>
 </div>
 <div class="bubble" id="bubble" hidden></div>
+
+<div class="aip" id="aip" aria-hidden="true">
+  <div class="aip-inner">
+    <div class="aip-head">
+      <div>
+        <div class="aip-title">接口设置</div>
+        <div class="aip-sub">兼容 OpenAI chat/completions 的接口均可</div>
+      </div>
+      <button type="button" class="btn ghost" id="aipClose">关闭</button>
+    </div>
+    <div class="ai-fields">
+      <label>接口地址
+        <input id="aiUrl" type="url" autocomplete="off" spellcheck="false"
+               placeholder="https://api.deepseek.com/chat/completions">
+      </label>
+      <label>API Key
+        <input id="aiKey" type="password" autocomplete="off" placeholder="sk-...">
+      </label>
+      <label>模型
+        <input id="aiModel" type="text" autocomplete="off" spellcheck="false" placeholder="deepseek-flash">
+      </label>
+    </div>
+    <div class="ai-note">
+      Key 只存在本机，直接发给上面这个地址，不经过第三方。首次用某个 Key 时，会先发送当前体系的约定卡，
+      之后每次分析都在同一段对话里继续。
+    </div>
+  </div>
+</div>
 
 <div class="picker" id="picker" aria-hidden="true">
   <div class="pk-inner">
