@@ -59,6 +59,7 @@ function render() {
   paintBubble(bd);
   paintAdvice();
   renderSummary(bd);
+  syncAISub();
   document.body.classList.toggle('done', !!bd.done);
 }
 
@@ -516,11 +517,13 @@ function curPage() {
   if (!sw) return 1;
   return Math.round(sw.scrollLeft / Math.max(1, sw.clientWidth));
 }
-function onTrackerPage() { return curPage() === 1; }
+function onTrackerPage() { return curPage() === 2; }
+function onAIPage() { return curPage() === 0; }
 
 function syncSwipe() {
   const p = curPage();
   $$('#pager i').forEach((el, i) => el.classList.toggle('on', i === p));
+  syncAISub();
 }
 
 function gotoPage(i) {
@@ -531,6 +534,27 @@ function gotoPage(i) {
 
 /* ---------------- AI 叫牌分析 ---------------- */
 const HCP_OF = { A: 4, K: 3, Q: 2, J: 1, T: 0 };
+
+function openCfg() {
+  const a = $('#aip');
+  if (a) { a.classList.add('on'); a.setAttribute('aria-hidden', 'false'); }
+  const c = state.ai || {};
+  const set = (id, v) => { const el = $('#' + id); if (el) el.value = v || ''; };
+  set('aiUrl', c.url);
+  set('aiKey', c.key);
+  set('aiModel', c.model);
+}
+
+function closeCfg() {
+  const a = $('#aip');
+  if (a) { a.classList.remove('on'); a.setAttribute('aria-hidden', 'true'); }
+}
+
+function shortHash(str) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36) + '_' + str.length;
+}
 
 function handStats(cards) {
   const st = { hcp: 0, S: 0, H: 0, D: 0, C: 0 };
@@ -603,6 +627,319 @@ function syncAIHandToHand() {
   save();
   paintAdvice();
   syncHandInputs();
+}
+
+/* 体系约定卡：首次用某个 Key 时发给 AI */
+function buildSystemCard() {
+  const sys = SYSTEMS[state.system];
+  const groups = [
+    ['开叫', 'open'], ['应叫', 'resp'], ['开叫方再叫', 'opener'],
+    ['应叫方再叫', 'responder'], ['防守叫牌', 'def'], ['问叫答叫', 'answer']
+  ];
+  let s = '【' + sys.name + ' 体系约定卡｜' + sys.full + '】\n';
+  s += '以下为本体系的全部叫牌约定，请以此作为分析依据；若某序列未列入，请明确说明「体系未收录」，不要自行编造。\n\n';
+
+  groups.forEach(([label, type]) => {
+    const rows = sys.rules.filter(r => r.t === type);
+    if (!rows.length) return;
+    s += '— ' + label + ' —\n';
+    rows.forEach(r => {
+      const bids = [].concat(r.b).map(b => (typeof b === 'string' ? b : '〔按叫品形态〕')).join(' / ');
+      const pts = r.p ? '（' + r.p + '点）' : '';
+      s += bids + pts + '：' + r.d + '\n';
+    });
+    s += '\n';
+  });
+
+  if (sys.convs && sys.convs.length) {
+    s += '— 约定叫速查 —\n';
+    sys.convs.forEach(c => {
+      s += c.s + '：' + c.a;
+      if (c.rows && c.rows.length) {
+        s += '（' + c.rows.map(x => x[0] + ' = ' + x[1]).join('；') + '）';
+      }
+      s += '\n';
+    });
+  }
+  return s;
+}
+
+function buildAIContext() {
+  const bd = board();
+  const seat = seatToAct(bd);
+  const ctx = analyze(bd, seat);
+  const list = recommendFor(bd, seat);
+  const sh = handShape(state.hand);
+  const picked = (state.aiHand || []).slice();
+  const pst = handStats(picked);
+
+  return {
+    system: SYSTEMS[state.system].name,
+    systemFull: SYSTEMS[state.system].full,
+    mySeat: state.mySeat,
+    seatToAct: seat,
+    hand: { hcp: state.hand.hcp, S: state.hand.S, H: state.hand.H, D: state.hand.D, C: state.hand.C },
+    shape: sh.text,
+    balanced: sh.bal,
+    picked: picked,
+    pickedStats: pst,
+    auction: bd.auction.map(c => ({ seat: c.seat, bid: c.bid })),
+    context: {
+      type: ctx.type,
+      typeCN: CTX_CN[ctx.type],
+      open: ctx.open || null,
+      resp: ctx.resp || null,
+      contested: !!ctx.contested
+    },
+    candidates: list.slice(0, 8).map(x => ({
+      bid: x.bid, points: x.pts || '', desc: x.why, source: x.src
+    }))
+  };
+}
+
+function aiPrompt(c) {
+  const au = c.auction.length
+    ? c.auction.map(x => SEAT_CN[x.seat] + ' ' + bidLabel(x.bid)).join(' → ')
+    : '（尚未有人叫牌）';
+
+  let s = '';
+  s += '【本次分析基于】' + c.system + ' 体系\n';
+  s += '【本家座位】' + SEAT_CN[c.mySeat] + '家\n';
+
+  if (c.picked.length) {
+    const bySuit = { S: [], H: [], D: [], C: [] };
+    c.picked.forEach(k => { if (bySuit[k[0]]) bySuit[k[0]].push(k.slice(1)); });
+    const fmt = st => bySuit[st].length ? SUIT_SYM[st] + bySuit[st].join(' ') : SUIT_SYM[st] + '—';
+    s += '【我的手牌（逐张）】' + c.picked.length + ' 张，' + c.pickedStats.hcp + ' 个大牌点\n';
+    s += '  ' + ['S', 'H', 'D', 'C'].map(fmt).join('　') + '\n';
+    if (c.picked.length < 13) {
+      s += '  （只列出已知的 ' + c.picked.length + ' 张，其余 ' + (13 - c.picked.length) + ' 张未指定）\n';
+    }
+  } else {
+    s += '【我的手牌】' + c.hand.hcp + ' 个大牌点，♠' + c.hand.S + ' ♥' + c.hand.H +
+         ' ♦' + c.hand.D + ' ♣' + c.hand.C + '（' + c.shape + '，' +
+         (c.balanced ? '均型' : '非均型') + '）\n';
+  }
+
+  s += '【叫牌过程】' + au + '\n';
+  s += '【当前轮到】' + SEAT_CN[c.seatToAct] + '家，语境：' + c.context.typeCN;
+  if (c.context.open) s += '（此前开叫 ' + bidLabel(c.context.open) + '）';
+  s += '\n';
+
+  if (c.candidates.length) {
+    s += '【体系规则筛出的候选】\n';
+    c.candidates.forEach((x, i) => {
+      s += (i + 1) + '. ' + bidLabel(x.bid) + '　' + (x.points || '点力不限') + '　' + x.desc + '\n';
+    });
+  } else {
+    s += '【体系规则筛出的候选】无（该序列未收录，或点力/牌型不吻合）\n';
+  }
+
+  s += '\n只回答两行，不要任何其他内容：\n';
+  s += '叫品：<推荐的叫品，如 1NT 或 Pass>\n';
+  s += '原因：<不超过 40 字，说清为什么这么叫>\n';
+  s += '不要说客套话，不要复述题目，不要展开分析。';
+  return s;
+}
+
+function aiGuard() {
+  const bd = board();
+  const seat = seatToAct(bd);
+  if (bd.done) return '本局已结束，开始新一局再分析。';
+  if (seat !== state.mySeat) {
+    return '现在轮到' + SEAT_CN[seat] + '家，不是本家（' + SEAT_CN[state.mySeat] + '家），没法分析本家的叫品。';
+  }
+  if (!(state.aiHand || []).length) {
+    const total = state.hand.S + state.hand.H + state.hand.D + state.hand.C;
+    if (total !== 13) return '手牌四门合计 ' + total + ' 张。要么在叫牌页把张数调到 13，要么在这里选具体牌张（可以不全选）。';
+  }
+  return '';
+}
+
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+function renderChat() {
+  const box = $('#aiChat');
+  if (!box) return;
+  const conv = state.aiConv;
+  if (!conv || !conv.ui || !conv.ui.length) {
+    box.innerHTML = '<div class="ai-empty">选好手牌后点「分析当前局面」。' +
+      '首次使用某个 Key 时会先发送当前体系的约定卡，之后每次分析都在同一段对话里继续。</div>';
+    return;
+  }
+  const m = conv.ui[conv.ui.length - 1];
+
+  if (m.r === 'err') {
+    box.innerHTML = '<div class="ai-msg a"><div class="ai-bub err">' + esc(m.t) + '</div></div>';
+    return;
+  }
+  if (m.pending) {
+    box.innerHTML = '<div class="ai-msg a"><div><div class="ai-tag">' +
+      esc(m.sys || '') + ' · 生成中…</div><div class="ai-bub">正在思考…</div></div></div>';
+    return;
+  }
+
+  let bid = '', why = '', other = [];
+  String(m.t).split('\n').forEach(ln => {
+    const b = /^\s*叫品[:：]\s*(.+)$/.exec(ln);
+    const w = /^\s*原因[:：]\s*(.+)$/.exec(ln);
+    if (b) bid = b[1].trim();
+    else if (w) why = w[1].trim();
+    else if (ln.trim()) other.push(ln.trim());
+  });
+
+  let inner = '';
+  if (bid || why) {
+    if (bid) inner += '<div class="ai-bid-line">' + esc(bid) + '</div>';
+    if (why) inner += '<div class="ai-why">' + esc(why) + '</div>';
+    if (other.length) inner += '<div class="ai-more">' + other.map(esc).join('<br>') + '</div>';
+  } else {
+    inner = esc(m.t).replace(/\n/g, '<br>');
+  }
+
+  box.innerHTML = '<div class="ai-msg a"><div style="max-width:86%">' +
+    '<div class="ai-tag">' + esc(m.sys || '') + ' · ' + fmtTime(m.at) + '</div>' +
+    '<div class="ai-bub">' + inner + '</div></div></div>';
+}
+
+function trimConv(c) {
+  const sys = c.messages.filter(m => m.role === 'system');
+  const rest = c.messages.filter(m => m.role !== 'system');
+  if (rest.length > 12) c.messages = sys.concat(rest.slice(-12));
+}
+
+function resetConv() {
+  state.aiConv = null;
+  save();
+  renderChat();
+  syncAISub();
+}
+
+function syncAISub() {
+  const el = $('#aiSub');
+  if (!el) return;
+  const sys = SYSTEMS[state.system];
+  const conv = state.aiConv;
+  const on = conv && conv.sys === state.system && conv.messages && conv.messages.length;
+  el.textContent = '当前体系：' + sys.name + (on ? '　·　对话进行中（' + Math.floor(conv.messages.filter(m => m.role !== 'system').length / 2) + ' 轮）' : '');
+  const bs = $('#aiBlockSub');
+  if (bs) bs.textContent = on ? Math.floor(conv.messages.filter(m => m.role !== 'system').length / 2) + ' 轮' : '';
+}
+
+async function runAI() {
+  const cfg = state.ai || {};
+  const bad = aiGuard();
+  if (bad) {
+    state.aiConv = state.aiConv || { key: '', sys: state.system, messages: [], ui: [] };
+    state.aiConv.ui = (state.aiConv.ui || []).concat([{ r: 'err', t: bad }]);
+    renderChat();
+    return;
+  }
+  if (!cfg.url || !cfg.key) {
+    openCfg();
+    state.aiConv = state.aiConv || { key: '', sys: state.system, messages: [], ui: [] };
+    state.aiConv.ui = (state.aiConv.ui || []).concat([{ r: 'err', t: '还没填接口地址和 Key。' }]);
+    renderChat();
+    return;
+  }
+
+  const kHash = shortHash(cfg.key);
+  if (!state.aiConv || state.aiConv.key !== kHash || state.aiConv.sys !== state.system) {
+    state.aiConv = { key: kHash, sys: state.system, messages: [], ui: [] };
+  }
+  const conv = state.aiConv;
+  if (!conv.ui) conv.ui = [];
+
+  // 该 Key 首次使用：先发体系卡
+  if (!conv.messages.length) {
+    conv.messages.push({ role: 'system', content: buildSystemCard() });
+  }
+
+  const ctx = buildAIContext();
+  const prompt = aiPrompt(ctx);
+  const summary = (ctx.picked.length ? ctx.picked.length + ' 张已选手牌 · ' : ctx.hand.hcp + ' 点 · ') +
+    '语境：' + ctx.context.typeCN;
+
+  conv.messages.push({ role: 'user', content: prompt });
+  conv.ui = [{ r: 'a', t: '正在思考…', sys: SYSTEMS[state.system].name, pending: true }];
+  renderChat();
+  save();
+
+  try {
+    const r = await fetch(cfg.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.key },
+      body: JSON.stringify({
+        model: cfg.model || 'gpt-4o-mini',
+        temperature: 0.3,
+        messages: conv.messages
+      })
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      const TIP = {
+        400: '请求格式错误',
+        401: 'API Key 无效或已被撤销',
+        402: '账户余额不足，需要先充值',
+        422: '请求参数有误',
+        429: '请求太快被限流，稍后再试',
+        500: '服务端故障',
+        503: '服务端繁忙'
+      };
+      const tip = TIP[r.status] ? TIP[r.status] + '　' : '';
+      throw new Error('HTTP ' + r.status + '　' + tip + t.slice(0, 140));
+    }
+    const data = await r.json();
+    const txt = data && data.choices && data.choices[0] &&
+      data.choices[0].message && data.choices[0].message.content;
+    if (!txt) throw new Error('返回格式不是标准 chat/completions');
+
+    conv.messages.push({ role: 'assistant', content: txt });
+    conv.ui = [{ r: 'a', t: txt, sys: SYSTEMS[state.system].name, at: Date.now() }];
+    trimConv(conv);
+    save();
+    renderChat();
+    syncAISub();
+  } catch (e) {
+    // 回滚这次提问，避免下次重复发送
+    conv.messages.pop();
+    conv.ui = [{ r: 'err', t: '请求失败：' + e.message }];
+    renderChat();
+    save();
+  }
+}
+
+function copyAIContext() {
+  const bad = aiGuard();
+  const txt = bad ? bad : aiPrompt(buildAIContext());
+  const done = ok => {
+    const conv = state.aiConv || { key: '', sys: state.system, messages: [], ui: [] };
+    conv.ui = conv.ui || [];
+    conv.ui.push({ r: 'sys', t: (ok ? '已复制上下文到剪贴板。' : '复制失败，请手动选中：') + '\n' + txt });
+    state.aiConv = conv;
+    renderChat();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(() => done(true)).catch(() => fallback());
+  } else { fallback(); }
+  function fallback() {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = txt;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      done(ok);
+    } catch (e) { done(false); }
+  }
 }
 
 /* ---------------- 手牌与推荐 ---------------- */
@@ -863,7 +1200,7 @@ function switchSystem(key) {
     state.inspect = null;
     state.aiConv = null;   // 体系变了，旧对话作废
   }
-  save(); renderBrand(); render(); renderPicker(); closePicker();
+  save(); renderBrand(); render(); renderChat(); renderPicker(); closePicker();
 }
 
 function init() {
@@ -876,6 +1213,12 @@ function init() {
 
   $('#btnNew').onclick = () => nextBoard();
 
+  $('#aiRun').onclick = () => runAI();
+  $('#aiCopy').onclick = () => copyAIContext();
+  $('#aiClear').onclick = () => resetConv();
+  $('#aiCfgBtn').onclick = () => openCfg();
+  $('#aipClose').onclick = () => closeCfg();
+  $('#aip').addEventListener('click', e => { if (e.target.id === 'aip') closeCfg(); });
   $('#aiHandClear').onclick = () => {
     if (!state.aiHand || !state.aiHand.length) return;
     state.aiHand = [];
@@ -1047,11 +1390,12 @@ function init() {
   render();
   paintTracker();
   paintAIHand();
+  renderChat();
   syncSwipe();
-  // 默认停在叫牌页（第 0 页）
+  // 默认停在叫牌页（第 1 页）
   requestAnimationFrame(() => {
     const sw = $('#swipe');
-    if (sw) sw.scrollLeft = 0;
+    if (sw) sw.scrollLeft = sw.clientWidth;
     syncSwipe();
   });
   if (!loaded) openPicker();
